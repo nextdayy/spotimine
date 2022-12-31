@@ -4,7 +4,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::SystemTime;
 
-use reqwest::blocking::Client;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -47,16 +46,15 @@ impl Account {
     }
 
     fn refresh(&mut self) -> Result<&str, String> {
-        let result = Client::new()
-            .post("https://accounts.spotify.com/api/token")
-            .form(&[
+        let result = ureq::
+            post("https://accounts.spotify.com/api/token")
+            .send_form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", self.refresh_token.as_str()),
                 ("client_id", SPOTIFY_CLIENT_ID),
             ])
-            .send()
             .map_err(|e| format!("failed to send token request: {}", e))?
-            .text()
+            .into_string()
             .map_err(|e| format!("failed to get token response: {}", e))?;
         let result: Account = serde_json::from_str(result.as_str()).unwrap();
         self.access_token = result.access_token;
@@ -74,23 +72,16 @@ fn get_access() -> Result<Account, String> {
     info!("Starting auth callback server");
     let listener = TcpListener::bind("127.0.0.1:8888").map_err(|e| e.to_string())?;
     let challenge = base64ify(random_string(64));
-    let res = Client::new().get("https://accounts.spotify.com/authorize?").query(
-        &[
-            ("client_id", SPOTIFY_CLIENT_ID),
-            ("response_type", "code"),
-            ("state", random_string(16).as_str()),
-            ("redirect_uri", "http://localhost:8888/callback.html"),
-            ("code_challenge_method", "S256"),
-            ("code_challenge", gen_code_challenge(&challenge).as_str()),
-            ("scope", "user-read-private user-read-email user-read-playback-state user-modify-playback-state user-read-currently-playing user-read-recently-played user-library-read user-library-modify user-top-read playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private")
-        ]
-    ).build();
-    open::that(
-        res.map_err(|_| "failed to create spotify auth request")?
-            .url()
-            .as_str(),
-    )
-    .map_err(|_| "failed to open browser")?;
+    let scope = "user-read-private user-read-email user-read-playback-state user-modify-playback-state user-read-currently-playing user-read-recently-played user-library-read user-library-modify user-top-read playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private";
+    let mut request = format!("client_id={}&response_type=code&state={}&redirect_uri=http://localhost:8888/callback.html&code_challenge_method=S256&code_challenge={}&scope={}",
+	    SPOTIFY_CLIENT_ID, random_string(16), 
+	    gen_code_challenge(&challenge), scope);
+    request = request.replace("/", "%2F");
+    request = request.replace(":", "%3A");
+    request = request.replace(" ", "+");
+    let req = format!("https://accounts.spotify.com/authorize?{}", request);
+    //println!("{}", req);
+    open::that(req).map_err(|_| "failed to open browser")?;
     get_token(callback(listener.accept())?, challenge)
 }
 
@@ -123,18 +114,16 @@ fn get_token(result: String, challenge: String) -> Result<Account, String> {
     let code = result.split("code=").collect::<Vec<&str>>()[1]
         .split('&')
         .collect::<Vec<&str>>()[0];
-    let result = Client::new()
-        .post("https://accounts.spotify.com/api/token")
-        .form(&[
+    let result = ureq::post("https://accounts.spotify.com/api/token")
+        .send_form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", "http://localhost:8888/callback.html"),
             ("client_id", SPOTIFY_CLIENT_ID),
             ("code_verifier", challenge.as_str()),
         ])
-        .send()
         .map_err(|e| format!("failed to send token request: {}", e))?
-        .text()
+        .into_string()
         .map_err(|e| format!("failed to get token response: {}", e))?;
     info!("Got token response");
     return serde_json::from_str(result.as_str()).map_err(|e| e.to_string());

@@ -77,7 +77,7 @@ pub(crate) fn load() -> Result<Spotimine, String> {
             std::fs::create_dir_all(&path).expect("Failed to create config directory");
             Spotimine::new(format!("{}\\config.json", path))
         }
-        "linux" => {
+        "linux" | "android" => {
             let path = format!("{}/.config/spotimine", std::env::var("HOME").unwrap());
             std::fs::create_dir_all(&path).expect("Failed to create config directory");
             Spotimine::new(format!("{}/config.json", path))

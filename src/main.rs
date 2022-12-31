@@ -3,7 +3,7 @@ use std::io;
 use std::io::Write;
 
 use colored::Colorize;
-use reqwest::blocking::Client;
+//use reqwest::blocking::Client;
 
 use crate::account::Account;
 use crate::config::{load, Config};
@@ -118,11 +118,11 @@ fn check_args_len(args: &Vec<&str>, len: usize) -> bool {
     true
 }
 
-fn request_api(account: &Account, endpoint: &str, typ: reqwest::Method) -> String {
-    let base = "https://api.spotify.com/v1";
-    String::from("L")
+//fn request_api(account: &Account, endpoint: &str, typ: reqwest::Method) -> String {
+//    let base = "https://api.spotify.com/v1";
+  //  String::from("L")
     //let response = Client::new().request(typ, format!("{}{}", base, endpoint)).json();
-}
+//}
 
 fn exit(code: i8) {
     std::process::exit(code as i32);
