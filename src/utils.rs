@@ -52,6 +52,18 @@ pub(crate) fn gen_code_challenge(s: &String) -> String {
     result
 }
 
+pub(crate) fn format_duration(secs: u32) -> String {
+    format!(
+        "{}:{}",
+        secs / 60,
+        if secs % 60 < 10 {
+            format!("0{}", secs % 60)
+        } else {
+            format!("{}", secs % 60)
+        }
+    )
+}
+
 pub struct Pair<A, B> {
     pub a: A,
     pub b: B,

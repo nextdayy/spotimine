@@ -34,33 +34,40 @@ impl Account {
 
     pub(crate) fn get_token(&mut self) -> &str {
         if self.needs_refresh() {
-            self.refresh().expect("Failed to refresh access token")
+            self.refresh().expect("Failed to refresh access token");
+            self.access_token.as_str()
         } else {
             self.access_token.as_str()
         }
     }
 
     pub(crate) fn new() -> Account {
-        let res = get_access().unwrap();
-        res
+        get_access().unwrap()
     }
 
-    fn refresh(&mut self) -> Result<&str, String> {
-        let result = ureq::
-            post("https://accounts.spotify.com/api/token")
+    pub(crate) fn refresh(&mut self) -> Result<&mut Account, String> {
+        let result = ureq::post("https://accounts.spotify.com/api/token")
             .send_form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", self.refresh_token.as_str()),
                 ("client_id", SPOTIFY_CLIENT_ID),
             ])
-            .map_err(|e| format!("failed to send token request: {}", e))?
+            .map_err(|e| {
+                format!(
+                    "failed to send token refresh request: {}",
+                    e.into_response()
+                        .expect("Tried to unwrap a completely broken response")
+                        .into_string()
+                        .expect("Tried to unwrap a completely broken response")
+                )
+            })?
             .into_string()
-            .map_err(|e| format!("failed to get token response: {}", e))?;
+            .map_err(|e| format!("failed to get token refresh response: {}", e))?;
         let result: Account = serde_json::from_str(result.as_str()).unwrap();
         self.access_token = result.access_token;
         self.expires_at = result.expires_at;
         self.refresh_token = result.refresh_token;
-        return Ok(self.access_token.as_str());
+        Ok(self)
     }
 
     pub(crate) fn to_json(&self) -> String {
@@ -76,9 +83,9 @@ fn get_access() -> Result<Account, String> {
     let mut request = format!("client_id={}&response_type=code&state={}&redirect_uri=http://localhost:8888/callback.html&code_challenge_method=S256&code_challenge={}&scope={}",
 	    SPOTIFY_CLIENT_ID, random_string(16), 
 	    gen_code_challenge(&challenge), scope);
-    request = request.replace("/", "%2F");
-    request = request.replace(":", "%3A");
-    request = request.replace(" ", "+");
+    request = request.replace('/', "%2F")
+        .replace(':', "%3A")
+        .replace(' ', "+");
     let req = format!("https://accounts.spotify.com/authorize?{}", request);
     //println!("{}", req);
     open::that(req).map_err(|_| "failed to open browser")?;

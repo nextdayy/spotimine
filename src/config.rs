@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::Account;
 use crate::utils::Pair;
-use crate::Spotimine;
+use crate::{info, Spotimine};
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -47,26 +47,43 @@ impl Config {
             .read_to_string(&mut read)
             .map_err(|e| e.to_string())?;
         let string = read.as_str().trim().trim_matches(char::from(0));
-        let config: Config = serde_json::from_str(string)
-            .map_err(|e| format!("Error deserializing: {}", e))?;
+        let config: Config =
+            serde_json::from_str(string).map_err(|e| format!("Error deserializing: {}", e))?;
         Ok(config)
     }
 
-    fn save_to(&mut self, file: &mut File) -> Result<(), String> {
+    pub fn save_to(&mut self, file: &mut File) -> Result<(), String> {
         file.set_len(0).expect("Failed to clear config file");
-        file
-            .write_all(
-                serde_json::to_string(self)
-                    .map_err(|e| e.to_string())?
-                    .as_bytes(),
-            )
-            .map_err(|e| e.to_string())
+        file.write_all(
+            serde_json::to_string(self)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Returns the account with the given alias, and saves the config
     pub(crate) fn add_account(&mut self, file: &mut File, key: &str, acc: Account) {
+        info!("Adding account named {}", key);
         self.accounts.insert(String::from(key), acc);
         let _ = self.save_to(file);
+    }
+
+    /// Returns the account with the given alias, and saves the config
+    pub(crate) fn remove_account(&mut self, file: &mut File, key: &str) {
+        info!("Adding account named {}", key);
+        self.accounts.remove(key);
+        let _ = self.save_to(file);
+    }
+
+    pub(crate) fn get_account(&mut self, key: &str) -> Option<&mut Account> {
+        let acc = self.accounts.get_mut(key);
+        acc
+    }
+
+    pub(crate) fn get_an_account(&mut self) -> Option<&mut Account> {
+        let acc = self.accounts.iter_mut().next().map(|(_, v)| v);
+        acc
     }
 }
 
