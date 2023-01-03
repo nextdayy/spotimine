@@ -63,17 +63,22 @@ impl Config {
     }
 
     /// Returns the account with the given alias, and saves the config
-    pub(crate) fn add_account(&mut self, file: &mut File, key: &str, acc: Account) {
+    pub(crate) fn add_account(
+        &mut self,
+        file: &mut File,
+        key: &str,
+        acc: Account,
+    ) -> Result<(), String> {
         info!("Adding account named {}", key);
         self.accounts.insert(String::from(key), acc);
-        let _ = self.save_to(file);
+        self.save_to(file)
     }
 
     /// Returns the account with the given alias, and saves the config
-    pub(crate) fn remove_account(&mut self, file: &mut File, key: &str) {
+    pub(crate) fn remove_account(&mut self, file: &mut File, key: &str) -> Result<(), String> {
         info!("Adding account named {}", key);
         self.accounts.remove(key);
-        let _ = self.save_to(file);
+        self.save_to(file)
     }
 
     pub(crate) fn get_account(&mut self, key: &str) -> Option<&mut Account> {
@@ -102,56 +107,3 @@ pub(crate) fn load() -> Result<Spotimine, String> {
         _ => Err(format!("{} is not supported.", std::env::consts::OS)),
     };
 }
-
-/*fn do_aliases(&mut self, json: String) {
-    let mut i: usize = 0;
-    for aliaseses in json.split("\"aliases\":[").collect::<Vec<&str>>()[1..].iter() {
-        let aliases;
-        if aliaseses.trim().ends_with("}") {
-            aliases = &aliaseses[..aliaseses.len() - 6];
-        } else {
-            aliases = &aliaseses[..aliaseses.len() - 1];
-        }
-        for alias in aliases.split(",").collect::<Vec<&str>>() {
-            self.accounts[i].aliases.push(alias.replace("\"", ""));
-        }
-        i += 1;
-    }
-}*/
-
-/*pub(crate) fn save(&mut self) {
-    let mut result = String::from("{ \"accounts\": [");
-    for acc in &self.accounts {
-        result.push_str(&acc.to_json());
-        result.push_str(", ");
-    }
-    if result.ends_with(",") {
-        result.pop();
-    }
-    result.push_str("] }");
-    let _ = self.file.set_len(0);
-    match self.file.write_all(result.as_bytes()) {
-        Ok(_) => {
-            info!("Created/Saved config");
-        }
-        Err(e) => {
-            error!("Failed to save config: {}", e);
-        }
-    }
-}
-
-fn load(file: File) -> Result<Config, String> {
-    let mut result = String::new();
-    let mut reader = BufReader::new(&file);
-    reader
-        .read_to_string(&mut result)
-        .map_err(|e| format!("failed to read config file: {}", e.to_string()))?;
-    let mut accounts = Vec::new();
-    for acc in result.split("},").collect::<Vec<&str>>().iter() {
-        accounts.push(from_json(acc.to_string())?);
-    }
-    info!("Loaded config ({} accounts)", accounts.len());
-    let mut config = Config { accounts, file };
-    let _ = config.do_aliases(result);
-    Ok(config)
-}*/

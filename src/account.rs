@@ -2,10 +2,9 @@ use std::fmt::{Debug, Formatter};
 use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::de::{Error, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::api::do_api_json;
 use crate::utils::{base64ify, gen_code_challenge, random_string};
@@ -15,7 +14,7 @@ use crate::{info, SPOTIFY_CLIENT_ID};
 pub struct Account {
     pub access_token: String,
     #[serde(alias = "expires_in")]
-    expires_at: Time,
+    expires_at: u64,
     refresh_token: String,
     #[serde(default = "id_default")]
     pub id: Option<String>,
@@ -36,33 +35,34 @@ impl Account {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs()
-                > self.expires_at.val
+                > self.expires_at
     }
 
-    pub(crate) fn get_token(&mut self) -> &str {
+    pub(crate) fn get_token(&mut self) -> Result<&str, String> {
         if self.needs_refresh() {
-            self.refresh().expect("Failed to refresh access token");
-            self.access_token.as_str()
+            info!("Refreshing token");
+            self.refresh()?;
+            Ok(self.access_token.as_str())
         } else {
-            self.access_token.as_str()
+            Ok(self.access_token.as_str())
         }
     }
 
-    pub(crate) fn get_id(&mut self) -> &String {
+    pub(crate) fn get_id(&mut self) -> Result<&String, String> {
         if self.id.is_none() {
             self.id = Some(String::from(
-                do_api_json("GET", "me", self, None).expect("Failed to get user id")["id"]
+                do_api_json("GET", "me", self, None)?["id"]
                     .as_str()
-                    .expect("Failed to get user id"),
+                    .ok_or("Failed to get user id")?,
             ));
-            self.id.as_ref().unwrap()
+            Ok(self.id.as_ref().unwrap())
         } else {
-            self.id.as_ref().unwrap()
+            Ok(self.id.as_ref().unwrap())
         }
     }
 
-    pub(crate) fn new() -> Account {
-        get_access().unwrap()
+    pub(crate) fn new() -> Result<Account, String> {
+        get_access()
     }
 
     pub(crate) fn refresh(&mut self) -> Result<&mut Account, String> {
@@ -74,24 +74,33 @@ impl Account {
             ])
             .map_err(|e| {
                 format!(
-                    "failed to send token refresh request: {}",
+                    "failed to send token refresh request: {}. Try re-adding this account",
                     e.into_response()
-                        .expect("Tried to unwrap a completely broken response")
+                        .unwrap_or_else(|| "Tried to unwrap a completely broken response"
+                            .parse()
+                            .unwrap())
                         .into_string()
-                        .expect("Tried to unwrap a completely broken response")
+                        .unwrap_or_else(|_| "Tried to unwrap a completely broken response"
+                            .parse()
+                            .unwrap())
                 )
             })?
             .into_string()
             .map_err(|e| format!("failed to get token refresh response: {}", e))?;
-        let result: Account = serde_json::from_str(result.as_str()).unwrap();
+        let result: Account = serde_json::from_str(result.as_str())
+            .map_err(|e| format!("failed to parse token response: {}", e))?;
+        info!("Refreshed access token");
         self.access_token = result.access_token;
-        self.expires_at = result.expires_at;
+        self.expires_at = result.expires_at + SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         self.refresh_token = result.refresh_token;
         Ok(self)
     }
 
-    pub(crate) fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("Failed to serialize account")
+    pub(crate) fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| format!("failed to serialize account: {}", e))
     }
 }
 
@@ -108,7 +117,6 @@ fn get_access() -> Result<Account, String> {
         .replace(':', "%3A")
         .replace(' ', "+");
     let req = format!("https://accounts.spotify.com/authorize?{}", request);
-    //println!("{}", req);
     open::that(req).map_err(|_| "failed to open browser")?;
     get_token(callback(listener.accept())?, challenge)
 }
@@ -154,56 +162,13 @@ fn get_token(result: String, challenge: String) -> Result<Account, String> {
         .into_string()
         .map_err(|e| format!("failed to get token response: {}", e))?;
     info!("Got token response");
-    return serde_json::from_str(result.as_str()).map_err(|e| e.to_string());
-}
-
-#[derive(Debug)]
-struct Time {
-    val: u64,
-}
-
-impl Serialize for Time {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if self.val > 100000 {
-            serializer.serialize_u64(self.val)
-        } else {
-            serializer.serialize_u64(
-                self.val
-                    + SystemTime::duration_since(&SystemTime::now(), SystemTime::UNIX_EPOCH)
-                        .expect("failed to parse expires_in")
-                        .as_secs(),
-            )
-        }
-    }
-}
-
-struct TimeVisitor;
-
-impl Visitor<'_> for TimeVisitor {
-    type Value = Time;
-
-    fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
-        formatter.write_str("a u64")
-    }
-
-    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
-    where
-        E: Error,
-    {
-        Ok(Time { val: v })
-    }
-}
-
-impl<'de> Deserialize<'de> for Time {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_u64(TimeVisitor)
-    }
+    let mut res: Account = serde_json::from_str(result.as_str()).map_err(|e| e.to_string())?;
+    res.expires_at += SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    info!("Account creation successful, requires refresh at {}", res.expires_at);
+    Ok(res)
 }
 
 impl Debug for Account {

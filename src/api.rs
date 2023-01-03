@@ -6,15 +6,15 @@ use crate::data::{Content, ContentType};
 use crate::warn;
 
 pub trait RequestExt {
-    fn add_auth(self, account: &mut Account) -> Self;
+    fn add_auth(self, account: &mut Account) -> Result<Request, String>;
 }
 
 impl RequestExt for Request {
-    fn add_auth(self, account: &mut Account) -> Request {
-        self.set(
+    fn add_auth(self, account: &mut Account) -> Result<Request, String> {
+        Ok(self.set(
             "Authorization",
-            format!("Bearer {}", account.get_token()).as_str(),
-        )
+            format!("Bearer {}", account.get_token()?).as_str(),
+        ))
     }
 }
 
@@ -28,12 +28,12 @@ pub fn do_api(
         method,
         format!("https://api.spotify.com/v1/{}", endpoint).as_str(),
     )
-    .add_auth(account);
+        .add_auth(account);
     let response = match method {
-        "GET" => req.call(),
-        "POST" => req.send_form(body.unwrap()),
-        "PUT" => req.send_form(body.unwrap()),
-        "DELETE" => req.call(),
+        "GET" => req?.call(),
+        "POST" => req?.send_form(body.unwrap()),
+        "PUT" => req?.send_form(body.unwrap()),
+        "DELETE" => req?.call(),
         _ => panic!("Invalid method"),
     };
     match response {
@@ -65,7 +65,6 @@ pub fn do_api(
                 _ => Err(format!("Failed to send request: {}", err)),
             }
         }
-
     }
 }
 
@@ -88,12 +87,28 @@ pub fn spotify_api_search<T: Content>(
     t: &ContentType,
     account: &mut Account,
 ) -> Result<Vec<T>, String> {
-    Ok(T::from_json_array(
-        &do_api_json(
-            "GET",
-            format!("search?q={}&type={}", query, t.to_str()).as_str(),
-            account,
-            None,
-        )?[t.to_str_plural()]["items"],
-    ))
+    return match t {
+        ContentType::Playlists => {
+            let json = do_api_json("GET", format!("search?q={}&type=playlist", query).as_str(), account, None)?;
+            let playlist_ids = json["playlists"]["items"].as_array().ok_or("Failed to parse playlists")?
+                .iter().map(|v| v["id"].as_str()).collect::<Vec<Option<&str>>>();
+            let mut results: Vec<T> = Vec::new();
+            for id in playlist_ids {
+                if id.is_some() {
+                    results.push(T::from_id(id.unwrap(), account)?);
+                }
+            }
+            Ok(results)
+        }
+        _ => {
+            T::from_json_array(
+                &do_api_json(
+                    "GET",
+                    format!("search?q={}&type={}", query, t.to_str()).as_str(),
+                    account,
+                    None,
+                )?[t.to_str_plural()]["items"],
+            )
+        }
+    }
 }

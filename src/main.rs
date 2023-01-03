@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::account::Account;
 use crate::api::{do_api, do_api_json, spotify_api_search};
 use crate::config::{load, Config};
-use crate::data::{Album, Artist, Content, ContentType, Playlist, Track};
+use crate::data::{Album, Artist, Content, ContentType, Playlist, Track, Visibility};
 
 mod account;
 mod api;
@@ -35,6 +35,15 @@ impl Spotimine {
     }
 }
 
+impl Drop for Spotimine {
+    fn drop(&mut self) {
+        info!("Saving config...");
+        self.config
+            .save_to(&mut self.file)
+            .expect("Failed to save config");
+    }
+}
+
 fn main() {
     println!(
         "{} v{} by {}; running on {}",
@@ -55,65 +64,67 @@ fn main() {
         io::stdout().flush().unwrap();
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
-        dispatch(input.as_str().trim(), &mut this);
+        match dispatch(input.as_str().trim(), &mut this) {
+            Ok(()) => (),
+            Err(e) => {
+                error!("{}", e.red())
+            }
+        }
     }
 }
 
-fn dispatch(command: &str, this: &mut Spotimine) {
+fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
     let args = command.split(' ').collect::<Vec<&str>>();
     match args[0] {
-        "" => {}
+        "" => Ok(()),
         "exit" => {
             println!("{}", "Exiting...".red());
             exit(0, this);
+            Ok(())
         }
         "adduser" => {
             if args.len() == 1 {
-                let mut account = Account::new();
+                let mut account = Account::new()?;
                 match do_api("GET", "me", &mut account, None) {
-                    Ok(res) => {
-                        this.config.add_account(
-                            &mut this.file,
-                            res.into_json::<Value>().unwrap()["display_name"]
-                                .as_str()
-                                .unwrap(),
-                            account,
-                        );
-                    }
-                    Err(_) => {
-                        error!("Failed to get account info from Spotify API.");
-                    }
+                    Ok(res) => this.config.add_account(
+                        &mut this.file,
+                        res.into_json::<Value>().unwrap()["display_name"]
+                            .as_str()
+                            .ok_or("Failed to get display name")?,
+                        account,
+                    ),
+                    Err(_) => Err("Failed to get account info from Spotify API."
+                        .parse()
+                        .unwrap()),
                 }
-            } else if check_args_len(&args, 1) {
+            } else {
+                check_args_len(&args, 1)?;
                 this.config
-                    .add_account(&mut this.file, args[1], Account::new());
+                    .add_account(&mut this.file, args[1], Account::new()?)
             }
         }
         "rmuser" => {
-            if check_args_len(&args, 1) {
-                this.config.remove_account(&mut this.file, args[1]);
-            }
+            check_args_len(&args, 1)?;
+            this.config.remove_account(&mut this.file, args[1])
         }
         "playlists" => {
             let acc = this.config.get_account(args[1]);
             if acc.is_none() {
-                error!(
+                return Err(format!(
                     "Account not found: {}. Try adding one with 'adduser'",
                     args[1]
-                );
-                return;
+                ));
             }
             info!("Getting playlists for {}. This may take a while, as we need to fetch all the tracks.", args[1]);
-            let acc = acc.unwrap();
+            let acc = acc.ok_or("Failed to get account")?;
             do_api_json(
                 "GET",
-                format!("users/{}/playlists", acc.get_id()).as_str(),
+                format!("users/{}/playlists", acc.get_id()?).as_str(),
                 acc,
                 None,
-            )
-            .unwrap()["items"]
+            )?["items"]
                 .as_array()
-                .unwrap()
+                .ok_or("Failed to get playlists")?
                 .iter()
                 .for_each(|playlist| {
                     println!(
@@ -125,34 +136,71 @@ fn dispatch(command: &str, this: &mut Spotimine) {
                                 acc,
                                 None
                             )
-                            .unwrap()
+                            .unwrap_or_default() // there is probably a better way to do this
                         )
-                    );
+                        .unwrap_or_else(|_| Playlist {
+                            name: "Failed to get playlist name".to_string(),
+                            description: "".to_string(),
+                            visibility: Visibility::Public,
+                            followers: 0,
+                            tracks: vec![],
+                        })
+                    )
                 });
+            Ok(())
         }
         "search" => {
-            if check_args_len(&args, 2) {
-                let account = this.config.get_an_account();
-                if account.is_none() {
-                    error!("No accounts found. At least one is required to use the API. Try adding one with 'adduser'");
-                    return;
-                }
-                match ContentType::from_str(args[1]) {
-                    Some(typ) => {
-                        match typ {
-                            // generic hell
-                            ContentType::Tracks => spotify_api_search::<Track>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{}", x)),
-                            ContentType::Albums => spotify_api_search::<Album>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
-                            ContentType::Artists => spotify_api_search::<Artist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
-                            ContentType::Playlists => spotify_api_search::<Playlist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
-                        }
+            check_args_len(&args, 2)?;
+            let account = this.config.get_an_account();
+            if account.is_none() {
+                return Err("No accounts found. At least one is required to use the API. Try adding one with 'adduser'".parse().unwrap());
+            }
+            info!("Searching for {}. This may take a few moments...", args[1]);
+            match ContentType::from_str(args[1]) {
+                Some(typ) => {
+                    match typ {
+                        // generic hell
+                        ContentType::Tracks => spotify_api_search::<Track>(
+                            args[2],
+                            &typ,
+                            account.ok_or("No account")?,
+                        )?
+                        .iter()
+                        .for_each(|x| println!("{}", x)),
+                        ContentType::Albums => spotify_api_search::<Album>(
+                            args[2],
+                            &typ,
+                            account.ok_or("No account")?,
+                        )?
+                        .iter()
+                        .for_each(|x| println!("{}", x)),
+                        ContentType::Artists => spotify_api_search::<Artist>(
+                            args[2],
+                            &typ,
+                            account.ok_or("No account")?,
+                        )?
+                        .iter()
+                        .for_each(|x| println!("{}", x)),
+                        ContentType::Playlists => spotify_api_search::<Playlist>(
+                            args[2],
+                            &typ,
+                            account.ok_or("No account")?,
+                        )?
+                        .iter()
+                        .for_each(|x| println!("{}", x)),
                     }
-                    None => error!("Invalid content type. Valid types are: 'track', 'album', 'artist', 'playlist'"),
+                    Ok(())
                 }
+                None => Err(
+                    "Invalid content type. Valid types are: 'track', 'album', 'artist', 'playlist'"
+                        .parse()
+                        .unwrap(),
+                ),
             }
         }
         "config" => {
             println!("config file is {:?}", this.file);
+            Ok(())
         }
         "users" => {
             println!("Found {} users:", this.config.accounts.len());
@@ -162,6 +210,7 @@ fn dispatch(command: &str, this: &mut Spotimine) {
                 id.push_str("...");
                 println!("{}: {}", key, id);
             }
+            Ok(())
         }
         "delusers" => {
             if user_yn(
@@ -169,16 +218,14 @@ fn dispatch(command: &str, this: &mut Spotimine) {
                 false,
             ) {
                 this.config.accounts.clear();
-                this.config
-                    .save_to(&mut this.file)
-                    .expect("Failed to save config");
+                this.config.save_to(&mut this.file)?;
                 info!("deleted all users.");
+                Ok(())
+            } else {
+                Ok(())
             }
         }
-        "testyn" => {
-            println!("{}", user_yn("Test? ", false));
-        }
-        _ => error!("Unknown command: '{}'", command),
+        _ => Err(format!("Unknown command: {}", args[0])),
     }
 }
 
@@ -199,16 +246,15 @@ fn user_yn(prompt: &str, default: bool) -> bool {
     };
 }
 
-fn check_args_len(args: &Vec<&str>, len: usize) -> bool {
+fn check_args_len(args: &Vec<&str>, len: usize) -> Result<(), String> {
     if args.len() < len + 1 {
-        error!(
+        return Err(format!(
             "Not enough arguments. Expected {}, got {}.",
             len,
             args.len() - 1
-        );
-        return false;
+        ));
     }
-    true
+    Ok(())
 }
 
 fn exit(code: i8, this: &mut Spotimine) {

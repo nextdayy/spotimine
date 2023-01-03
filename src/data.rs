@@ -1,8 +1,8 @@
-use crate::account::Account;
-use crate::api::RequestExt;
 use colored::Colorize;
 use serde_json::Value;
 use std::fmt::{Display, Formatter};
+use crate::account::Account;
+use crate::api::do_api_json;
 
 use crate::utils::{format_duration, rfc3339_to_duration, strip_html_tags};
 
@@ -129,21 +129,16 @@ impl ContentType {
 }
 
 pub trait Content: Sized {
-    fn from_json(json: &Value) -> Self;
-    fn from_id(id: &str, user: &mut Account, typ: &ContentType) -> Self {
-        let result =
-            ureq::get(format!("https://api.spotify.com/v1/{}/{}", typ.to_str(), id).as_str())
-                .add_auth(user)
-                .call();
-        let json = result.unwrap().into_json::<Value>().unwrap();
-        Self::from_json(&json)
-    }
-    fn from_json_array(json: &Value) -> Vec<Self> {
+    fn from_json(json: &Value) -> Result<Self, String>;
+    fn from_json_array(json: &Value) -> Result<Vec<Self>, String> {
         let mut vec = Vec::new();
-        for item in json.as_array().unwrap() {
-            vec.push(Self::from_json(item));
+        for item in json.as_array().ok_or(format!("json was not an array: {}", json))? {
+            vec.push(Self::from_json(item)?);
         }
-        vec
+        Ok(vec)
+    }
+    fn from_id(id: &str, user: &mut Account) -> Result<Self, String> {
+        Self::from_json(&do_api_json("GET", format!("{}s/{}", Self::type_string(), id).as_str(), user, None)?)
     }
     fn type_string() -> String;
 }
@@ -195,21 +190,21 @@ impl Display for Playlist {
 }
 
 impl Content for Track {
-    fn from_json(json: &Value) -> Self {
+    fn from_json(json: &Value) -> Result<Self, String> {
         let mut artists = Vec::new();
-        for artist in json["artists"]
-            .as_array()
-            .unwrap_or_else(|| panic!("Expected array deserializing artists: data = {}", json))
-        {
-            artists.push(Artist::from_json(artist));
+        for artist in json["artists"].as_array().ok_or(format!(
+            "Expected array deserializing artists: data = {}",
+            json
+        ))? {
+            artists.push(Artist::from_json(artist)?);
         }
-        Track {
+        Ok(Track {
             name: json["name"].as_str().unwrap().to_string(),
             artists,
             duration: (json["duration_ms"].as_u64().unwrap() / 1000) as u32,
             explicit: json["explicit"].as_bool().unwrap(),
             uri: SpotifyURI::from_str(json["uri"].as_str().unwrap().to_string()),
-        }
+        })
     }
 
     fn type_string() -> String {
@@ -218,11 +213,11 @@ impl Content for Track {
 }
 
 impl Content for PlaylistTrack {
-    fn from_json(json: &Value) -> Self {
-        PlaylistTrack {
-            track: Track::from_json(&json["track"]),
-            added_at: rfc3339_to_duration(&json["added_at"].as_str().unwrap().to_string()),
-        }
+    fn from_json(json: &Value) -> Result<Self, String> {
+        Ok(PlaylistTrack {
+            track: Track::from_json(&json["track"])?,
+            added_at: rfc3339_to_duration(json["added_at"].as_str().ok_or("timestamp missing")?),
+        })
     }
     fn type_string() -> String {
         String::from("track")
@@ -230,11 +225,14 @@ impl Content for PlaylistTrack {
 }
 
 impl Content for Artist {
-    fn from_json(json: &Value) -> Self {
-        Artist {
-            name: json["name"].as_str().unwrap().to_string(),
+    fn from_json(json: &Value) -> Result<Self, String> {
+        Ok(Artist {
+            name: json["name"]
+                .as_str()
+                .ok_or("missing name field?")?
+                .to_string(),
             uri: SpotifyURI::from_str(json["uri"].as_str().unwrap().to_string()),
-        }
+        })
     }
     fn type_string() -> String {
         String::from("artist")
@@ -242,13 +240,21 @@ impl Content for Artist {
 }
 
 impl Content for Album {
-    fn from_json(json: &Value) -> Self {
-        Album {
-            name: json["name"].as_str().unwrap().to_string(),
-            artists: Artist::from_json_array(&json["artists"]),
-            tracks: Track::from_json_array(&json["tracks"]["items"]),
-            uri: SpotifyURI::from_str(json["uri"].as_str().unwrap().to_string()),
-        }
+    fn from_json(json: &Value) -> Result<Self, String> {
+        Ok(Album {
+            name: json["name"]
+                .as_str()
+                .ok_or("missing name field?")?
+                .to_string(),
+            artists: Artist::from_json_array(&json["artists"])?,
+            tracks: Track::from_json_array(&json["tracks"]["items"])?,
+            uri: SpotifyURI::from_str(
+                json["uri"]
+                    .as_str()
+                    .ok_or("missing URI field?")?
+                    .to_string(),
+            ),
+        })
     }
     fn type_string() -> String {
         String::from("album")
@@ -256,31 +262,39 @@ impl Content for Album {
 }
 
 impl Content for Playlist {
-    fn from_json(json: &Value) -> Self {
+    fn from_json(json: &Value) -> Result<Self, String> {
         let tracks = &mut json["tracks"]["items"]
             .as_array()
-            .unwrap_or_else(|| panic!("Expected array deserializing tracks: data = {}", json))
+            .ok_or(format!(
+                "Expected array deserializing tracks: data = {}",
+                json
+            ))?
             .iter()
             .collect::<Vec<&Value>>();
         tracks.retain(|x| !x["track"].is_null());
-        let tracks: Vec<PlaylistTrack> =
-            tracks.iter().map(|x| PlaylistTrack::from_json(x)).collect();
-        Playlist {
-            name: json["name"].as_str().unwrap().to_string(),
+        let tracks: Vec<PlaylistTrack> = tracks
+            .iter()
+            .map(|x| PlaylistTrack::from_json(x))
+            .collect::<Result<Vec<PlaylistTrack>, String>>()?;
+        Ok(Playlist {
+            name: json["name"]
+                .as_str()
+                .ok_or("missing name field?")?
+                .to_string(),
             description: json["description"]
                 .as_str()
-                .unwrap()
+                .ok_or("missing description field?")?
                 .to_string()
                 .trim()
                 .parse()
-                .unwrap(),
+                .map_err(|_| "description failed to parse")?,
             visibility: Visibility::from_api(
                 json["collaborative"].as_bool().unwrap_or(false),
                 json["public"].as_bool().unwrap_or(false),
             ),
             followers: json["followers"]["total"].as_u64().unwrap_or(0) as u32,
             tracks,
-        }
+        })
     }
     fn type_string() -> String {
         String::from("playlist")
