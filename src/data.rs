@@ -1,27 +1,35 @@
-use colored::Colorize;
-use serde_json::Value;
 use std::fmt::{Display, Formatter};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use colored::Colorize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 use crate::account::Account;
-use crate::api::do_api_json;
+use crate::api::{do_api, do_api_json};
+use crate::info;
+use crate::utils::{format_duration, rfc3339_to_epoch_time, strip_html_tags};
 
-use crate::utils::{format_duration, rfc3339_to_duration, strip_html_tags};
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
     pub name: String,
     pub description: String,
     pub visibility: Visibility,
     pub followers: u32,
     pub tracks: Vec<PlaylistTrack>,
+    pub uri: SpotifyURI,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistTrack {
     pub track: Track,
     pub added_at: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
     pub name: String,
     pub artists: Vec<Artist>,
@@ -30,14 +38,14 @@ pub struct Track {
     pub uri: SpotifyURI,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub followers: u32,
     pub uri: SpotifyURI,
     pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Album {
     pub name: String,
     pub artists: Vec<Artist>,
@@ -45,13 +53,13 @@ pub struct Album {
     pub uri: SpotifyURI,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Artist {
     pub name: String,
     pub uri: SpotifyURI,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpotifyURI {
     pub uri: String,
 }
@@ -60,9 +68,15 @@ impl SpotifyURI {
     pub fn from_str(uri: String) -> SpotifyURI {
         SpotifyURI { uri }
     }
+    pub fn get_id(&self) -> String {
+        self.uri.split(':').last().unwrap().to_string()
+    }
+    pub fn get_type(&self) -> ContentType {
+        ContentType::from_str(self.uri.split(':').nth(1).unwrap()).expect("Invalid URI")
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Visibility {
     Public,
     Private,
@@ -79,11 +93,24 @@ impl Visibility {
             Visibility::Private
         }
     }
+    pub fn is_public(&self) -> bool {
+        match self {
+            Visibility::Public => true,
+            _ => false,
+        }
+    }
+    pub fn is_collaborative(&self) -> bool {
+        match self {
+            Visibility::Collaborative => true,
+            _ => false,
+        }
+    }
 }
 
 trait Stringify {
     fn stringify(&self) -> String;
 }
+
 impl Stringify for Vec<Artist> {
     fn stringify(&self) -> String {
         self.iter()
@@ -93,6 +120,7 @@ impl Stringify for Vec<Artist> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentType {
     Tracks,
     Artists,
@@ -132,15 +160,41 @@ pub trait Content: Sized {
     fn from_json(json: &Value) -> Result<Self, String>;
     fn from_json_array(json: &Value) -> Result<Vec<Self>, String> {
         let mut vec = Vec::new();
-        for item in json.as_array().ok_or(format!("json was not an array: {}", json))? {
+        for item in json
+            .as_array()
+            .ok_or(format!("json was not an array: {}", json))?
+        {
             vec.push(Self::from_json(item)?);
         }
         Ok(vec)
     }
     fn from_id(id: &str, user: &mut Account) -> Result<Self, String> {
-        Self::from_json(&do_api_json("GET", format!("{}s/{}", Self::type_string(), id).as_str(), user, None)?)
+        Self::from_json(&do_api_json(
+            "GET",
+            format!("{}s/{}", Self::type_string(), id).as_str(),
+            user,
+            None,
+        )?)
+    }
+    fn from_ids(ids: &[&str], user: &mut Account) -> Result<Vec<Self>, String> {
+        let mut vec = Vec::new();
+        let mut vec_ids: Vec<&str> = Vec::new();
+        for id in ids {
+            vec_ids.push(id);
+            if vec_ids.len() == 50 {
+                vec.append(&mut Self::from_json_array(&do_api_json(
+                    "GET",
+                    format!("{}s/?ids={}", Self::type_string(), vec_ids.join(",")).as_str(),
+                    user,
+                    None,
+                )?)?);
+                vec_ids.clear();
+            }
+        }
+        Ok(vec)
     }
     fn type_string() -> String;
+    fn get_uri(&self) -> &SpotifyURI;
 }
 
 impl Display for Track {
@@ -206,9 +260,11 @@ impl Content for Track {
             uri: SpotifyURI::from_str(json["uri"].as_str().unwrap().to_string()),
         })
     }
-
     fn type_string() -> String {
         String::from("track")
+    }
+    fn get_uri(&self) -> &SpotifyURI {
+        &self.uri
     }
 }
 
@@ -216,11 +272,14 @@ impl Content for PlaylistTrack {
     fn from_json(json: &Value) -> Result<Self, String> {
         Ok(PlaylistTrack {
             track: Track::from_json(&json["track"])?,
-            added_at: rfc3339_to_duration(json["added_at"].as_str().ok_or("timestamp missing")?),
+            added_at: rfc3339_to_epoch_time(json["added_at"].as_str().ok_or("timestamp missing")?),
         })
     }
     fn type_string() -> String {
         String::from("track")
+    }
+    fn get_uri(&self) -> &SpotifyURI {
+        &self.track.uri
     }
 }
 
@@ -236,6 +295,9 @@ impl Content for Artist {
     }
     fn type_string() -> String {
         String::from("artist")
+    }
+    fn get_uri(&self) -> &SpotifyURI {
+        &self.uri
     }
 }
 
@@ -258,6 +320,9 @@ impl Content for Album {
     }
     fn type_string() -> String {
         String::from("album")
+    }
+    fn get_uri(&self) -> &SpotifyURI {
+        &self.uri
     }
 }
 
@@ -293,10 +358,126 @@ impl Content for Playlist {
                 json["public"].as_bool().unwrap_or(false),
             ),
             followers: json["followers"]["total"].as_u64().unwrap_or(0) as u32,
+            uri: SpotifyURI::from_str(
+                json["uri"]
+                    .as_str()
+                    .ok_or("missing URI field?")?
+                    .to_string(),
+            ),
             tracks,
         })
     }
     fn type_string() -> String {
         String::from("playlist")
+    }
+    fn get_uri(&self) -> &SpotifyURI {
+        &self.uri
+    }
+}
+
+impl Playlist {
+    pub fn to_file(&self, path: &Path) -> Result<(), String> {
+        let mut file = File::create(path).map_err(|e| e.to_string())?;
+        file.write_all(
+            serde_json::to_string_pretty(self)
+                .map_err(|e| e.to_string())?
+                .as_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        let mut file = File::open(path).map_err(|e| e.to_string())?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str(&contents).map_err(|e| e.to_string())
+    }
+    pub fn get_ids(&self) -> Vec<String> {
+        self.tracks
+            .iter()
+            .map(|x| x.track.uri.uri.clone())
+            .collect()
+    }
+
+    fn copy(
+        &self,
+        owner: &mut Account,
+        new_name: Option<&str>,
+        new_user: Option<&mut Account>,
+    ) -> Result<Playlist, String> {
+        let mut new_playlist = Playlist {
+            name: new_name.unwrap_or(&self.name).to_string(),
+            description: (&self.description).to_string(),
+            visibility: self.visibility.clone(),
+            followers: self.followers,
+            tracks: vec![],
+            uri: SpotifyURI {
+                uri: "".to_string(),
+            },
+        };
+        let user = new_user.unwrap_or(owner);
+        new_playlist.create_online(user)?;
+        let tracks: Vec<Track> = self.tracks.iter().map(|x| x.track.clone()).collect();
+        new_playlist.put_tracks(owner, &tracks)?;
+        Ok(new_playlist)
+    }
+
+    pub fn put_tracks(&mut self, user: &mut Account, tracks: &Vec<Track>) -> Result<(), String> {
+        self.tracks.push(PlaylistTrack {
+            track: tracks[0].clone(),
+            added_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        });
+        let mut s = String::new();
+        let mut i: u8 = 0;
+        let mut ii: u8 = 0;
+        info!(
+            "Adding tracks to playlist... ({}/{})",
+            ii * 100,
+            tracks.len()
+        );
+        for track in tracks {
+            if i == 100 {
+                do_api(
+                    "POST",
+                    &format!("playlists/{}/tracks?uris={}", self.uri.get_id(), s),
+                    user,
+                    None,
+                )?;
+                s = String::new();
+                i = 0;
+                ii += 1;
+            }
+            s.push_str(&track.uri.uri);
+            s.push(',');
+            i += 1;
+        }
+        Ok(())
+    }
+
+    fn create_online(&mut self, user: &mut Account) -> Result<(), String> {
+        self.uri = SpotifyURI::from_str(
+            do_api_json(
+                "POST",
+                format!("users/{}/playlists", user.get_id()?).as_str(),
+                user,
+                Some(&[
+                    ("name", &self.name.as_str()),
+                    ("description", &self.description.as_str()),
+                    ("public", &self.visibility.is_public().to_string()),
+                    (
+                        "collaborative",
+                        &self.visibility.is_collaborative().to_string(),
+                    ),
+                ]),
+            )?["uri"]
+                .as_str()
+                .ok_or("missing URI field, when creating playlist, probably invalid response")?
+                .to_string(),
+        );
+        Ok(())
     }
 }

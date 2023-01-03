@@ -15,8 +15,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub(crate) fn init(path: &str) -> Result<Pair<File, Config>, String> {
-        let path = Path::new(path);
+    pub(crate) fn init(path: &Path) -> Result<Pair<File, Config>, String> {
         let mut file: File;
         if path.exists() {
             file = OpenOptions::new()
@@ -53,9 +52,9 @@ impl Config {
     }
 
     pub fn save_to(&mut self, file: &mut File) -> Result<(), String> {
-        file.set_len(0).expect("Failed to clear config file");
+        file.set_len(0).map_err(|e| e.to_string())?;
         file.write_all(
-            serde_json::to_string(self)
+            serde_json::to_string_pretty(self)
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         )

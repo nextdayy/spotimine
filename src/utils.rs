@@ -52,7 +52,7 @@ pub(crate) fn gen_code_challenge(s: &String) -> String {
     result
 }
 
-pub(crate) fn rfc3339_to_duration(s: &str) -> u64 {
+pub(crate) fn rfc3339_to_epoch_time(s: &str) -> u64 {
     let s = s.replace('Z', "");
     let s = s.split('T').collect::<Vec<&str>>();
     let date = s[0]
@@ -73,6 +73,27 @@ pub(crate) fn rfc3339_to_duration(s: &str) -> u64 {
         + date[2] * 86400
         + date[1] * 2592000
         + date[0] * 31104000_u64
+}
+
+pub(crate) fn epoch_time_to_rfc3339(t: u64) -> String {
+    let mut t = t;
+    let mut s = String::new();
+    let years = t / 31104000;
+    t -= years * 31104000;
+    let months = t / 2592000;
+    t -= months * 2592000;
+    let days = t / 86400;
+    t -= days * 86400;
+    let hours = t / 3600;
+    t -= hours * 3600;
+    let minutes = t / 60;
+    t -= minutes * 60;
+    let seconds = t;
+    s.push_str(&format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        years, months, days, hours, minutes, seconds
+    ));
+    s
 }
 
 pub(crate) fn strip_html_tags(str: &str) -> String {

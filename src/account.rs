@@ -12,12 +12,12 @@ use crate::{info, SPOTIFY_CLIENT_ID};
 
 #[derive(Serialize, Deserialize)]
 pub struct Account {
-    pub access_token: String,
+    access_token: String,
     #[serde(alias = "expires_in")]
     expires_at: u64,
     refresh_token: String,
     #[serde(default = "id_default")]
-    pub id: Option<String>,
+    id: Option<String>,
     pub scope: String,
 }
 
@@ -91,16 +91,18 @@ impl Account {
             .map_err(|e| format!("failed to parse token response: {}", e))?;
         info!("Refreshed access token");
         self.access_token = result.access_token;
-        self.expires_at = result.expires_at + SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.expires_at = result.expires_at
+            + SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
         self.refresh_token = result.refresh_token;
         Ok(self)
     }
 
     pub(crate) fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string(self).map_err(|e| format!("failed to serialize account: {}", e))
+        serde_json::to_string_pretty(self)
+            .map_err(|e| format!("failed to serialize account: {}", e))
     }
 }
 
@@ -167,7 +169,10 @@ fn get_token(result: String, challenge: String) -> Result<Account, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
-    info!("Account creation successful, requires refresh at {}", res.expires_at);
+    info!(
+        "Account creation successful, requires refresh at {}",
+        res.expires_at
+    );
     Ok(res)
 }
 
