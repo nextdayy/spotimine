@@ -111,7 +111,8 @@ fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
         }
         "copy" => {
             check_args_len(&args, 2)?;
-            user_choose()
+            //user_choose()
+            Ok(())
         }
         "playlists" => {
             check_args_len(&args, 2)?;
