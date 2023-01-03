@@ -52,6 +52,44 @@ pub(crate) fn gen_code_challenge(s: &String) -> String {
     result
 }
 
+pub(crate) fn rfc3339_to_duration(s: &str) -> u64 {
+    let s = s.replace('Z', "");
+    let s = s.split('T').collect::<Vec<&str>>();
+    let date = s[0]
+        .split('-')
+        .collect::<Vec<&str>>()
+        .iter()
+        .map(|s| s.parse::<u64>().unwrap())
+        .collect::<Vec<u64>>();
+    let time = s[1]
+        .split(':')
+        .collect::<Vec<&str>>()
+        .iter()
+        .map(|s| s.parse::<u64>().unwrap())
+        .collect::<Vec<u64>>();
+    time[0] * 3600
+        + time[1] * 60
+        + time[2]
+        + date[2] * 86400
+        + date[1] * 2592000
+        + date[0] * 31104000_u64
+}
+
+pub(crate) fn strip_html_tags(str: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    for c in str.chars() {
+        if c == '<' {
+            in_tag = true;
+        } else if c == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(c);
+        }
+    }
+    result
+}
+
 pub(crate) fn format_duration(secs: u32) -> String {
     format!(
         "{}:{}",

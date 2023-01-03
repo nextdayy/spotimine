@@ -6,9 +6,9 @@ use colored::Colorize;
 use serde_json::Value;
 
 use crate::account::Account;
-use crate::api::{do_api, spotify_api_search};
+use crate::api::{do_api, do_api_json, spotify_api_search};
 use crate::config::{load, Config};
-use crate::data::{Album, Artist, ContentTypes, Playlist, Track};
+use crate::data::{Album, Artist, Content, ContentType, Playlist, Track};
 
 mod account;
 mod api;
@@ -94,20 +94,57 @@ fn dispatch(command: &str, this: &mut Spotimine) {
                 this.config.remove_account(&mut this.file, args[1]);
             }
         }
+        "playlists" => {
+            let acc = this.config.get_account(args[1]);
+            if acc.is_none() {
+                error!(
+                    "Account not found: {}. Try adding one with 'adduser'",
+                    args[1]
+                );
+                return;
+            }
+            info!("Getting playlists for {}. This may take a while, as we need to fetch all the tracks.", args[1]);
+            let acc = acc.unwrap();
+            do_api_json(
+                "GET",
+                format!("users/{}/playlists", acc.get_id()).as_str(),
+                acc,
+                None,
+            )
+            .unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .for_each(|playlist| {
+                    println!(
+                        "{}",
+                        Playlist::from_json(
+                            &do_api_json(
+                                "GET",
+                                format!("playlists/{}", playlist["id"].as_str().unwrap()).as_str(),
+                                acc,
+                                None
+                            )
+                            .unwrap()
+                        )
+                    );
+                });
+        }
         "search" => {
             if check_args_len(&args, 2) {
                 let account = this.config.get_an_account();
                 if account.is_none() {
-                    error!("No accounts found. At least one is required to use the API. Try using 'adduser'");
+                    error!("No accounts found. At least one is required to use the API. Try adding one with 'adduser'");
                     return;
                 }
-                match ContentTypes::from_str(args[1]) {
+                match ContentType::from_str(args[1]) {
                     Some(typ) => {
                         match typ {
-                            ContentTypes::Tracks => spotify_api_search::<Track>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{}", x)),
-                            ContentTypes::Albums => spotify_api_search::<Album>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
-                            ContentTypes::Artists => spotify_api_search::<Artist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
-                            ContentTypes::Playlists => spotify_api_search::<Playlist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
+                            // generic hell
+                            ContentType::Tracks => spotify_api_search::<Track>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{}", x)),
+                            ContentType::Albums => spotify_api_search::<Album>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
+                            ContentType::Artists => spotify_api_search::<Artist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
+                            ContentType::Playlists => spotify_api_search::<Playlist>(args[2], &typ, account.unwrap()).unwrap().iter().for_each(|x| println!("{:?}", x)),
                         }
                     }
                     None => error!("Invalid content type. Valid types are: 'track', 'album', 'artist', 'playlist'"),

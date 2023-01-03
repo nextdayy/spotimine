@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::api::do_api_json;
 use crate::utils::{base64ify, gen_code_challenge, random_string};
 use crate::{info, SPOTIFY_CLIENT_ID};
 
@@ -16,7 +17,13 @@ pub struct Account {
     #[serde(alias = "expires_in")]
     expires_at: Time,
     refresh_token: String,
+    #[serde(default = "id_default")]
+    pub id: Option<String>,
     pub scope: String,
+}
+
+fn id_default() -> Option<String> {
+    None
 }
 
 impl Account {
@@ -38,6 +45,19 @@ impl Account {
             self.access_token.as_str()
         } else {
             self.access_token.as_str()
+        }
+    }
+
+    pub(crate) fn get_id(&mut self) -> &String {
+        if self.id.is_none() {
+            self.id = Some(String::from(
+                do_api_json("GET", "me", self, None).expect("Failed to get user id")["id"]
+                    .as_str()
+                    .expect("Failed to get user id"),
+            ));
+            self.id.as_ref().unwrap()
+        } else {
+            self.id.as_ref().unwrap()
         }
     }
 
@@ -83,7 +103,8 @@ fn get_access() -> Result<Account, String> {
     let mut request = format!("client_id={}&response_type=code&state={}&redirect_uri=http://localhost:8888/callback.html&code_challenge_method=S256&code_challenge={}&scope={}",
 	    SPOTIFY_CLIENT_ID, random_string(16), 
 	    gen_code_challenge(&challenge), scope);
-    request = request.replace('/', "%2F")
+    request = request
+        .replace('/', "%2F")
         .replace(':', "%3A")
         .replace(' ', "+");
     let req = format!("https://accounts.spotify.com/authorize?{}", request);
@@ -195,38 +216,3 @@ impl Debug for Account {
             .finish()
     }
 }
-
-/*pub(crate) fn from_json(json: String) -> Result<Account, String> {
-    Ok(Account {
-        // goofy ahh json parser
-        access_token: json.split("access_token").collect::<Vec<&str>>()[1]
-            .split(":")
-            .collect::<Vec<&str>>()[1]
-            .split(",")
-            .collect::<Vec<&str>>()[0]
-            .replace("\"", ""),
-        expires_at: json.split("expires_in").collect::<Vec<&str>>()[1]
-            .split(":")
-            .collect::<Vec<&str>>()[1]
-            .split(",")
-            .collect::<Vec<&str>>()[0]
-            .parse::<u64>()
-            .expect("failed to parse expires_in")
-            + SystemTime::duration_since(&SystemTime::now(), SystemTime::UNIX_EPOCH)
-                .expect("failed to parse expires_in")
-                .as_secs(),
-        refresh_token: json.split("refresh_token").collect::<Vec<&str>>()[1]
-            .split(":")
-            .collect::<Vec<&str>>()[1]
-            .split(",")
-            .collect::<Vec<&str>>()[0]
-            .replace("\"", ""),
-        scope: json.split("scope").collect::<Vec<&str>>()[1]
-            .split(":")
-            .collect::<Vec<&str>>()[1]
-            .split(",")
-            .collect::<Vec<&str>>()[0]
-            .replace("\"", ""),
-        aliases: Vec::new(),
-    })
-}*/

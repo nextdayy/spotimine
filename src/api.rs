@@ -2,7 +2,7 @@ use serde_json::Value;
 use ureq::{Error, Request, Response};
 
 use crate::account::Account;
-use crate::data::{Content, ContentTypes};
+use crate::data::{Content, ContentType};
 use crate::warn;
 
 pub trait RequestExt {
@@ -45,6 +45,9 @@ pub fn do_api(
                         401 => {
                             do_api(method, endpoint, account.refresh().expect("Failed to refresh access token"), body)
                         }
+                        403 => {
+                            Err("User account OAuth is invalid. Please try re-adding this account, then try again.".to_string())
+                        }
                         423 => {
                             let retry_after = match response.header("Retry-After") {
                                 Some(val) => val.parse::<u64>().unwrap(),
@@ -82,7 +85,7 @@ pub fn do_api_json(
 
 pub fn spotify_api_search<T: Content>(
     query: &str,
-    t: &ContentTypes,
+    t: &ContentType,
     account: &mut Account,
 ) -> Result<Vec<T>, String> {
     Ok(T::from_json_array(
