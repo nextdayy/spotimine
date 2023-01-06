@@ -1,17 +1,17 @@
+use crossterm::style::Stylize;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::account::Account;
-use crate::api::{do_api, do_api_json};
-use crate::info;
+use crate::api::{do_api, do_api_json, get_liked_songs};
 use crate::utils::{format_duration, rfc3339_to_epoch_time, strip_html_tags};
+use crate::{info, user_yn, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playlist {
@@ -68,8 +68,8 @@ impl SpotifyURI {
     pub fn from_str(uri: String) -> SpotifyURI {
         SpotifyURI { uri }
     }
-    pub fn get_id(&self) -> String {
-        self.uri.split(':').last().unwrap().to_string()
+    pub fn get_id(&self) -> &str {
+        self.uri.split(':').last().unwrap()
     }
     pub fn get_type(&self) -> ContentType {
         ContentType::from_str(self.uri.split(':').nth(1).unwrap()).expect("Invalid URI")
@@ -94,16 +94,10 @@ impl Visibility {
         }
     }
     pub fn is_public(&self) -> bool {
-        match self {
-            Visibility::Public => true,
-            _ => false,
-        }
+        matches!(self, Visibility::Public)
     }
     pub fn is_collaborative(&self) -> bool {
-        match self {
-            Visibility::Collaborative => true,
-            _ => false,
-        }
+        matches!(self, Visibility::Collaborative)
     }
 }
 
@@ -157,7 +151,9 @@ impl ContentType {
 }
 
 pub trait Content: Sized {
+    /// create this from the given json value. This is used to create a content from the API/Cache.
     fn from_json(json: &Value) -> Result<Self, String>;
+    /// creates an array from the given json array. This is used to create a content from the API/Cache.
     fn from_json_array(json: &Value) -> Result<Vec<Self>, String> {
         let mut vec = Vec::new();
         for item in json
@@ -168,14 +164,16 @@ pub trait Content: Sized {
         }
         Ok(vec)
     }
+    /// creates this from the given spotify ID.
     fn from_id(id: &str, user: &mut Account) -> Result<Self, String> {
         Self::from_json(&do_api_json(
             "GET",
             format!("{}s/{}", Self::type_string(), id).as_str(),
             user,
-            None,
+            "",
         )?)
     }
+    /// creates an array of this from the given spotify id.
     fn from_ids(ids: &[&str], user: &mut Account) -> Result<Vec<Self>, String> {
         let mut vec = Vec::new();
         let mut vec_ids: Vec<&str> = Vec::new();
@@ -186,14 +184,21 @@ pub trait Content: Sized {
                     "GET",
                     format!("{}s/?ids={}", Self::type_string(), vec_ids.join(",")).as_str(),
                     user,
-                    None,
+                    "",
                 )?)?);
                 vec_ids.clear();
             }
         }
         Ok(vec)
     }
+    fn cache(&self) -> Result<(), String> {
+        //let path = Path::new();
+        todo!();
+    }
+
+    /// the static string of the type of this content. e.g. track, artist, album, playlist
     fn type_string() -> String;
+    /// return the URI of this content.
     fn get_uri(&self) -> &SpotifyURI;
 }
 
@@ -201,7 +206,7 @@ impl Display for Track {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             "{} by {} ({})",
-            self.name.blue().bold(),
+            self.name.as_str().blue().bold(),
             self.artists.stringify().blue(),
             format_duration(self.duration)
         ))
@@ -210,7 +215,7 @@ impl Display for Track {
 
 impl Display for Artist {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("{}", self.name.blue().bold()))
+        f.write_str(&format!("{}", self.name.as_str().blue().bold()))
     }
 }
 
@@ -218,7 +223,7 @@ impl Display for Album {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(&format!(
             "{} by {}",
-            self.name.blue().bold(),
+            self.name.as_str().blue().bold(),
             self.artists.stringify().blue()
         ))
     }
@@ -229,14 +234,14 @@ impl Display for Playlist {
         if !self.description.is_empty() {
             f.write_str(&format!(
                 "{} - {} ({} followers)",
-                self.name.blue().bold(),
+                self.name.as_str().blue().bold(),
                 strip_html_tags(&self.description).blue(),
                 self.followers
             ))
         } else {
             f.write_str(&format!(
                 "{} ({} followers)",
-                self.name.blue().bold(),
+                self.name.as_str().blue().bold(),
                 self.followers
             ))
         }
@@ -247,7 +252,7 @@ impl Content for Track {
     fn from_json(json: &Value) -> Result<Self, String> {
         let mut artists = Vec::new();
         for artist in json["artists"].as_array().ok_or(format!(
-            "Expected array deserializing artists: data = {}",
+            "Expected array deserializing artists for track: data = {}",
             json
         ))? {
             artists.push(Artist::from_json(artist)?);
@@ -393,14 +398,20 @@ impl Playlist {
             .map_err(|e| e.to_string())?;
         serde_json::from_str(&contents).map_err(|e| e.to_string())
     }
-    pub fn get_ids(&self) -> Vec<String> {
-        self.tracks
-            .iter()
-            .map(|x| x.track.uri.uri.clone())
-            .collect()
+
+    pub fn sort_tracks(&mut self) {
+        self.tracks.sort_by(|a, b| b.added_at.cmp(&a.added_at));
     }
 
-    fn copy(
+    pub fn print_tracks_ordered(&mut self) {
+        self.sort_tracks();
+        for track in &self.tracks {
+            println!("{}", track.track.name);
+        }
+    }
+
+    /// copies this playlist from one account to another, or from one name to another, and possibly both.
+    pub fn copy(
         &self,
         owner: &mut Account,
         new_name: Option<&str>,
@@ -408,74 +419,158 @@ impl Playlist {
     ) -> Result<Playlist, String> {
         let mut new_playlist = Playlist {
             name: new_name.unwrap_or(&self.name).to_string(),
-            description: (&self.description).to_string(),
+            description: self.description.to_string(),
             visibility: self.visibility.clone(),
             followers: self.followers,
-            tracks: vec![],
+            tracks: self.tracks.clone(),
             uri: SpotifyURI {
                 uri: "".to_string(),
             },
         };
+        if new_user.is_none() {
+            warn!("staying on same user");
+        }
         let user = new_user.unwrap_or(owner);
+        info!("Creating new playlist on account {}", user.get_id()?);
         new_playlist.create_online(user)?;
-        let tracks: Vec<Track> = self.tracks.iter().map(|x| x.track.clone()).collect();
-        new_playlist.put_tracks(owner, &tracks)?;
+        info!("created new playlist");
+        new_playlist.put_tracks_online(user, false)?;
+        info!("copied playlist");
         Ok(new_playlist)
     }
 
-    pub fn put_tracks(&mut self, user: &mut Account, tracks: &Vec<Track>) -> Result<(), String> {
-        self.tracks.push(PlaylistTrack {
-            track: tracks[0].clone(),
-            added_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        });
-        let mut s = String::new();
-        let mut i: u8 = 0;
-        let mut ii: u8 = 0;
-        info!(
-            "Adding tracks to playlist... ({}/{})",
-            ii * 100,
-            tracks.len()
-        );
-        for track in tracks {
-            if i == 100 {
-                do_api(
-                    "POST",
-                    &format!("playlists/{}/tracks?uris={}", self.uri.get_id(), s),
-                    user,
-                    None,
-                )?;
-                s = String::new();
-                i = 0;
-                ii += 1;
-            }
-            s.push_str(&track.uri.uri);
-            s.push(',');
-            i += 1;
+    pub fn copy_to_liked(&self, new_acc: &mut Account) -> Result<(), String> {
+        if !user_yn(
+            "This method will overwrite your liked songs on the target account. Continue?",
+            false,
+        ) {
+            return Err("Aborted".to_string());
         }
+        let mut liked = get_liked_songs(new_acc)?;
+        info!("clearing liked songs on account {}", new_acc.get_id()?);
+        liked.clear_tracks_online(new_acc, true)?;
+        info!("copying tracks");
+        liked.tracks = self.tracks.clone();
+        liked.put_tracks_online(new_acc, true)?;
+        info!("copied to liked songs");
         Ok(())
     }
 
+    /// create a new playlist from the given vec of tracks. The playlist will be created on the
+    /// account provided.
+    pub fn create_from_vec(
+        user: &mut Account,
+        tracks: Vec<Track>,
+        name: String,
+        description: Option<String>,
+    ) -> Result<Playlist, String> {
+        let mut playlist = Playlist {
+            name,
+            description: description.unwrap_or_default(),
+            visibility: Visibility::Private,
+            followers: 0,
+            tracks: tracks
+                .iter()
+                .map(|x| PlaylistTrack {
+                    track: x.clone(),
+                    added_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                })
+                .collect(),
+            uri: SpotifyURI {
+                uri: "".to_string(),
+            },
+        };
+        playlist.create_online(user)?;
+        playlist.put_tracks_online(user, false)?;
+        Ok(playlist)
+    }
+
+    /// put the tracks in this playlist onto its online self.
+    pub fn put_tracks_online(&mut self, user: &mut Account, liked: bool) -> Result<(), String> {
+        self.sort_tracks();
+        let mut requests: Vec<&str> = Vec::new();
+        for track in &self.tracks {
+            if liked {
+                requests.push(track.track.uri.get_id());
+            } else {
+                requests.push(track.track.uri.uri.as_str())
+            };
+        }
+        let requests = requests.chunks(50).collect::<Vec<&[&str]>>();
+        let mut i: usize = 0;
+        for request in requests {
+            info!("Adding tracks to playlist... ({}/{})", i, self.tracks.len());
+            do_api(
+                if liked { "PUT" } else { "POST" },
+                (if !liked {
+                    format!("playlists/{}/tracks", self.uri.get_id())
+                } else {
+                    String::from("me/tracks")
+                })
+                .as_str(),
+                user,
+                request,
+            )?;
+            i += request.len();
+        }
+        info!("Added tracks to playlist");
+        Ok(())
+    }
+
+    pub fn clear_tracks_online(&self, user: &mut Account, liked: bool) -> Result<(), String> {
+        let mut requests = Vec::new();
+        for track in &self.tracks {
+            if liked {
+                requests.push(track.track.uri.get_id());
+            } else {
+                requests.push(track.track.uri.uri.as_str())
+            };
+        }
+        let requests = requests.chunks(50).collect::<Vec<&[&str]>>();
+        let mut i: usize = 0;
+        for request in requests {
+            info!(
+                "Deleting tracks from playlist... ({}/{})",
+                i,
+                self.tracks.len()
+            );
+            do_api(
+                "DELETE",
+                (if !liked {
+                    format!("playlists/{}/tracks", self.uri.get_id())
+                } else {
+                    String::from("me/tracks")
+                })
+                .as_str(),
+                user,
+                request,
+            )?;
+            i += request.len();
+        }
+        info!("cleared tracks on playlist");
+        Ok(())
+    }
+
+    /// Create a playlist on the Spotify API from this playlist.
+    /// This will also set the URI of this playlist to the URI of the newly created playlist.
     fn create_online(&mut self, user: &mut Account) -> Result<(), String> {
         self.uri = SpotifyURI::from_str(
             do_api_json(
                 "POST",
                 format!("users/{}/playlists", user.get_id()?).as_str(),
                 user,
-                Some(&[
-                    ("name", &self.name.as_str()),
-                    ("description", &self.description.as_str()),
-                    ("public", &self.visibility.is_public().to_string()),
-                    (
-                        "collaborative",
-                        &self.visibility.is_collaborative().to_string(),
-                    ),
-                ]),
+                json!({
+                    "name": self.name.as_str(),
+                    "description": self.description.as_str(),
+                    "public": &self.visibility.is_public(),
+                    "collaborative": &self.visibility.is_collaborative(),
+                }),
             )?["uri"]
                 .as_str()
-                .ok_or("missing URI field, when creating playlist, probably invalid response")?
+                .ok_or("missing URI field when creating playlist: probably invalid response")?
                 .to_string(),
         );
         Ok(())

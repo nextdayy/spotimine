@@ -1,16 +1,22 @@
+extern crate core;
+
+use core::str;
 use std::fmt::Display;
 use std::fs::File;
-use std::io;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{io, thread};
 
-use colored::Colorize;
-use serde_json::Value;
+use crossterm::style::Stylize;
+use signal_hook::consts::SIGINT;
 
 use crate::account::Account;
-use crate::api::{do_api, do_api_json, spotify_api_search};
+use crate::api::{do_api_json, get_liked_songs, get_playlists_for, spotify_api_search};
 use crate::config::{load, Config};
-use crate::data::{Album, Artist, Content, ContentType, Playlist, Track};
+use crate::data::{Album, Artist, ContentType, Playlist, Track};
 
 mod account;
 mod api;
@@ -58,10 +64,18 @@ fn main() {
         "For instructions and how to use, please visit {}.",
         "https://github.com/nxtdaydelivery/spotimine"
             .blue()
-            .underline()
+            .underlined()
     );
     let mut this = load().expect("Failed to initialize");
-    loop {
+    let term = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(SIGINT, Arc::clone(&term))
+        .expect("Failed to register signal handler");
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))
+        .expect("Failed to register signal handler");
+    signal_hook::flag::register(signal_hook::consts::SIGQUIT, Arc::clone(&term))
+        .expect("Failed to register signal handler");
+
+    while !term.load(Ordering::Relaxed) {
         print!("{}", "spotimine> ".green());
         io::stdout().flush().unwrap();
         let mut input = String::new();
@@ -73,6 +87,7 @@ fn main() {
             }
         }
     }
+    exit(1, &mut this);
 }
 
 fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
@@ -87,10 +102,10 @@ fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
         "adduser" => {
             if args.len() == 1 {
                 let mut account = Account::new()?;
-                match do_api("GET", "me", &mut account, None) {
+                match do_api_json("GET", "me", &mut account, "") {
                     Ok(res) => this.config.add_account(
                         &mut this.file,
-                        res.into_json::<Value>().unwrap()["display_name"]
+                        res["display_name"]
                             .as_str()
                             .ok_or("Failed to get display name")?,
                         account,
@@ -100,22 +115,24 @@ fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
                         .unwrap()),
                 }
             } else {
-                check_args_len(&args, 1)?;
+                check_args_len(&args, 1, "adduser [<optional> alias]")?;
                 this.config
                     .add_account(&mut this.file, args[1], Account::new()?)
             }
         }
         "rmuser" => {
-            check_args_len(&args, 1)?;
+            check_args_len(&args, 1, "rmuser [account_name]")?;
             this.config.remove_account(&mut this.file, args[1])
         }
-        "copy" => {
-            check_args_len(&args, 2)?;
-            //user_choose()
+        "liked" => {
+            check_args_len(&args, 1, "liked [account_name]")?;
+            let account = this.config.get_account(args[1]).ok_or("Unknown Account")?;
+            let mut liked = get_liked_songs(account)?;
+            liked.print_tracks_ordered();
             Ok(())
         }
-        "playlists" => {
-            check_args_len(&args, 2)?;
+        "copy" => {
+            check_args_len(&args, 2, "copy [source account] [dst account] [<optional> target_name, use liked to OVERWRITE liked songs]")?;
             let acc = this.config.get_account(args[1]);
             if acc.is_none() {
                 return Err(format!(
@@ -123,65 +140,59 @@ fn dispatch(command: &str, this: &mut Spotimine) -> Result<(), String> {
                     args[1]
                 ));
             }
-            info!("Getting playlists for {}. This may take a while, as we need to fetch all the tracks.", args[1]);
-            let acc = acc.ok_or("Failed to get account")?;
-            do_api_json(
-                "GET",
-                format!("users/{}/playlists", acc.get_id()?).as_str(),
-                acc,
-                None,
-            )?["items"]
-                .as_array()
-                .ok_or("Failed to get playlists")?
-                .iter()
-                .for_each(|playlist| {
-                    println!(
-                        "{}",
-                        Playlist::from_id(playlist["id"].as_str().unwrap(), acc).unwrap()
-                    )
-                });
+            let acc = &mut acc.unwrap().clone();
+            let acc2 = this.config.get_account(args[2]);
+            let target_name = args.get(3).copied();
+            if acc2.is_none() {
+                return Err(format!(
+                    "Account not found: {}. Try adding one with 'adduser'",
+                    args[2]
+                ));
+            }
+            let acc2 = &mut acc2.unwrap();
+            let mut vec = get_playlists_for(acc)?;
+            vec.push(get_liked_songs(acc)?);
+            let p = user_choose("Choose a playlist to copy", vec, 0)?;
+            if args.get(3).copied().unwrap_or_default() == "liked" {
+                p.copy_to_liked(acc2)?;
+            } else {
+                p.copy(acc, target_name, Some(acc2))?;
+            }
             Ok(())
         }
         "search" => {
-            check_args_len(&args, 2)?;
+            check_args_len(&args, 2, "search [content_type] [query...]")?;
             let query = args[2..].join(" ");
             let account = this.config.get_an_account();
             if account.is_none() {
                 return Err("No accounts found. At least one is required to use the API. Try adding one with 'adduser'".parse().unwrap());
             }
+            let account = account.ok_or("No account")?;
             info!("Searching for {}. This may take a few moments...", args[1]);
             match ContentType::from_str(args[1]) {
                 Some(typ) => {
                     match typ {
                         // generic hell
-                        ContentType::Tracks => spotify_api_search::<Track>(
-                            query.as_str(),
-                            &typ,
-                            account.ok_or("No account")?,
-                        )?
-                        .iter()
-                        .for_each(|x| println!("{}", x)),
-                        ContentType::Albums => spotify_api_search::<Album>(
-                            query.as_str(),
-                            &typ,
-                            account.ok_or("No account")?,
-                        )?
-                        .iter()
-                        .for_each(|x| println!("{}", x)),
-                        ContentType::Artists => spotify_api_search::<Artist>(
-                            query.as_str(),
-                            &typ,
-                            account.ok_or("No account")?,
-                        )?
-                        .iter()
-                        .for_each(|x| println!("{}", x)),
-                        ContentType::Playlists => spotify_api_search::<Playlist>(
-                            query.as_str(),
-                            &typ,
-                            account.ok_or("No account")?,
-                        )?
-                        .iter()
-                        .for_each(|x| println!("{}", x)),
+                        ContentType::Tracks => {
+                            spotify_api_search::<Track>(query.as_str(), &typ, account)?
+                                .iter()
+                                .for_each(|x| println!("{}", x))
+                        }
+                        ContentType::Albums => {
+                            spotify_api_search::<Album>(query.as_str(), &typ, account)?
+                                .iter()
+                                .for_each(|x| println!("{}", x))
+                        }
+                        ContentType::Artists => {
+                            spotify_api_search::<Artist>(query.as_str(), &typ, account)?
+                                .iter()
+                                .for_each(|x| println!("{}", x))
+                        }
+                        ContentType::Playlists => {
+                            spotify_api_search::<Playlist>(query.as_str(), &typ, account)?
+                                .iter()
+                                .for_each(|x| println!("{}", x))
+                        }
                     }
                     Ok(())
                 }
@@ -239,35 +250,83 @@ fn user_yn(prompt: &str, default: bool) -> bool {
     };
 }
 
-fn user_choose<T: Display + Clone>(prompt: &str, data: Vec<T>, default: usize) -> T {
-    let mut i: u16 = 0;
-    for t in data {
+fn user_choose<T: Display + Clone>(
+    prompt: &str,
+    data: Vec<T>,
+    default: usize,
+) -> Result<T, String> {
+    for (i, t) in (0_u16..).zip(data.iter()) {
         println!("[{}]: {}", i, t);
-        i += 1;
     }
     let mut input = String::new();
     print!("{} (default: {}): ", prompt, default);
     io::stdout().flush().unwrap();
     io::stdin().read_line(&mut input).unwrap();
-    let input = input
-        .trim()
-        .parse::<usize>()
-        .unwrap_or_else(|_| default as usize);
-    data.get(input).unwrap().clone()
+    let input = input.trim().parse::<usize>().map_err(|_| "Invalid input")?;
+    Ok(data.get(input).unwrap().clone())
 }
 
-fn check_args_len(args: &Vec<&str>, len: usize) -> Result<(), String> {
+fn user_choose_multi<T: Display + Clone>(prompt: &str, data: Vec<T>) -> Result<Vec<T>, String> {
+    for (i, t) in (0_u16..).zip(data.iter()) {
+        println!("[{}]: {}", i, t);
+    }
+    let mut input = String::new();
+    print!("{} (eg: '1 2 3', '3-6'): ", prompt);
+    io::stdout().flush().unwrap();
+    io::stdin().read_line(&mut input).unwrap();
+    let mut out = Vec::new();
+    let _ = input
+        .trim()
+        .split(' ')
+        .try_for_each(|v| -> Result<(), String> {
+            if v.contains('-') {
+                let mut split = v.split('-');
+                let start = split
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid input")?;
+                let end = split
+                    .next()
+                    .unwrap()
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid input")?;
+                (start..=end).for_each(|i| out.push(data[i].clone()));
+                Ok(())
+            } else {
+                out.push(data[v.parse::<usize>().map_err(|_| "Invalid input")?].clone());
+                Ok(())
+            }
+        });
+    Ok(out)
+}
+
+fn wait(prompt: &str, time_s: u8) {
+    let mut time = time_s;
+    while time > 0 {
+        print!("{} ({}s) ", prompt, time);
+        io::stdout().flush().unwrap();
+        thread::sleep(Duration::from_secs(1));
+        print!("\r");
+        io::stdout().flush().unwrap();
+        time -= 1;
+    }
+}
+
+fn check_args_len(args: &Vec<&str>, len: usize, help: &str) -> Result<(), String> {
     if args.len() < len + 1 {
         return Err(format!(
-            "Not enough arguments. Expected {}, got {}.",
+            "Not enough arguments. Expected {}, got {}.\nUsage: {}",
             len,
-            args.len() - 1
+            args.len() - 1,
+            help
         ));
     }
     Ok(())
 }
 
 fn exit(code: i8, this: &mut Spotimine) {
+    println!("{}", "Exiting...".red());
     this.config
         .save_to(&mut this.file)
         .expect("Failed to save config while exiting, users may be corrupt!");

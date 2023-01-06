@@ -52,6 +52,8 @@ pub(crate) fn gen_code_challenge(s: &String) -> String {
     result
 }
 
+/// convert a timestamp in RFC3339 format to a unix timestamp.
+/// e.g. 2020-01-01T00:00:00Z -> 1577836800
 pub(crate) fn rfc3339_to_epoch_time(s: &str) -> u64 {
     let s = s.replace('Z', "");
     let s = s.split('T').collect::<Vec<&str>>();
@@ -75,6 +77,7 @@ pub(crate) fn rfc3339_to_epoch_time(s: &str) -> u64 {
         + date[0] * 31104000_u64
 }
 
+/// inverse of <code>[rfc3339_to_epoch_time]</code>
 pub(crate) fn epoch_time_to_rfc3339(t: u64) -> String {
     let mut t = t;
     let mut s = String::new();
@@ -126,4 +129,23 @@ pub(crate) fn format_duration(secs: u32) -> String {
 pub struct Pair<A, B> {
     pub a: A,
     pub b: B,
+}
+
+pub trait StringSized {
+    /// size a string to the given length. <br>
+    /// if it is too long, it will be cut to [limit] - 3 with ... on the end. <br>
+    /// if it is too short, it will be padded with spaces to [limit].
+    fn sized(&self, limit: usize) -> String;
+}
+
+impl StringSized for String {
+    fn sized(&self, limit: usize) -> String {
+        if self.len() > limit {
+            format!("{}...", &self[..limit - 3])
+        } else {
+            let mut s = self.clone();
+            s.push_str(&" ".repeat(limit - self.len()));
+            s
+        }
+    }
 }

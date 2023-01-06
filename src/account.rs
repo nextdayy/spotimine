@@ -10,7 +10,7 @@ use crate::api::do_api_json;
 use crate::utils::{base64ify, gen_code_challenge, random_string};
 use crate::{info, SPOTIFY_CLIENT_ID};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Account {
     access_token: String,
     #[serde(alias = "expires_in")]
@@ -40,7 +40,6 @@ impl Account {
 
     pub(crate) fn get_token(&mut self) -> Result<&str, String> {
         if self.needs_refresh() {
-            info!("Refreshing token");
             self.refresh()?;
             Ok(self.access_token.as_str())
         } else {
@@ -48,10 +47,10 @@ impl Account {
         }
     }
 
-    pub(crate) fn get_id(&mut self) -> Result<&String, String> {
+    pub(crate) fn get_id(&mut self) -> Result<&str, String> {
         if self.id.is_none() {
             self.id = Some(String::from(
-                do_api_json("GET", "me", self, None)?["id"]
+                do_api_json("GET", "me", self, "")?["id"]
                     .as_str()
                     .ok_or("Failed to get user id")?,
             ));
@@ -66,6 +65,7 @@ impl Account {
     }
 
     pub(crate) fn refresh(&mut self) -> Result<&mut Account, String> {
+        info!("Refreshing token");
         let result = ureq::post("https://accounts.spotify.com/api/token")
             .send_form(&[
                 ("grant_type", "refresh_token"),

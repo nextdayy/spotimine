@@ -32,7 +32,7 @@ impl Config {
                 .create(true)
                 .open(path)
                 .map_err(|e| e.to_string())?;
-            let mut config = Config {
+            let config = Config {
                 accounts: HashMap::new(),
             };
             config.save_to(&mut file)?;
@@ -51,7 +51,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn save_to(&mut self, file: &mut File) -> Result<(), String> {
+    pub fn save_to(&self, file: &mut File) -> Result<(), String> {
         file.set_len(0).map_err(|e| e.to_string())?;
         file.write_all(
             serde_json::to_string_pretty(self)
